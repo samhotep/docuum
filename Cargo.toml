@@ -1,6 +1,6 @@
 [package]
 name = "docuum"
-version = "0.23.1"
+version = "0.25.0"
 authors = ["Stephan Boyer <stephan@stephanboyer.com>"]
 edition = "2021"
 description = "LRU eviction of Docker images."
@@ -10,6 +10,12 @@ homepage = "https://github.com/stepchowfun/docuum"
 repository = "https://github.com/stepchowfun/docuum"
 readme = "README.md"
 
+[lints]
+clippy.all = { level = "deny", priority = -1 }
+clippy.default_numeric_fallback = "deny"
+clippy.pedantic = { level = "deny", priority = -1 }
+rust.warnings = "deny"
+
 [dependencies]
 atty = "0.2"
 byte-unit = "4"
@@ -18,11 +24,11 @@ colored = "2"
 dirs = "3"
 env_logger = { version = "0.8", default-features = false, features = ["termcolor", "atty"] }
 log = "0.4"
-scopeguard = "1"
+regex = { version = "1.5.5", default-features = false, features = ["std", "unicode-perl"] }
 serde_json = "1.0"
 serde_yaml = "0.8"
 tempfile = "3"
-regex = { version = "1.5.5", default-features = false, features = ["std", "unicode-perl"] }
+parse_duration = "2.1.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sysinfo = "0.23.5"
@@ -30,6 +36,10 @@ sysinfo = "0.23.5"
 [dependencies.clap]
 version = "2"
 features = ["wrap_help"]
+
+[dependencies.ctrlc]
+version = "3"
+features = ["termination"] # [tag:ctrlc_term]
 
 [dependencies.serde]
 version = "1"

@@ -1,8 +1,8 @@
-image: ubuntu:20.04
+image: ubuntu:24.04
 default: build
 user: user
 command_prefix: |
-  # Make Bash not silently ignore errors.
+  # Make not silently ignore errors.
   set -euo pipefail
 
   # Load the Rust startup file, if it exists.
@@ -17,11 +17,14 @@ command_prefix: |
   cargo-offline () { cargo --frozen --offline "$@"; }
 
   # Use this wrapper for formatting code or checking that code is formatted. We use a nightly Rust
-  # version for the `trailing_comma` formatting option [tag:rust_fmt_nightly_2023-10-06]. The
+  # version for the `trailing_comma` formatting option [tag:rust_fmt_nightly_2024-09-06]. The
   # nightly version was chosen as the latest available release with all components present
   # according to this page:
   #   https://rust-lang.github.io/rustup-components-history/x86_64-unknown-linux-gnu.html
-  cargo-fmt () { cargo +nightly-2023-10-06 --frozen --offline fmt --all -- "$@"; }
+  cargo-fmt () { cargo +nightly-2024-09-06 --frozen --offline fmt --all -- "$@"; }
+
+  # Make Bash log commands.
+  set -x
 tasks:
   install_packages:
     description: Install system packages.
@@ -29,6 +32,7 @@ tasks:
     command: |
       # Install the following packages:
       #
+      # - build-essential       - Used to link some crates
       # - ca-certificates       - Used for fetching Docker's GPG key
       # - curl                  - Used for installing Docker, Tagref, and Rust
       # - gcc-aarch64-linux-gnu - Used for linking the binary for AArch64
@@ -39,6 +43,7 @@ tasks:
       # - shellcheck            - Used for linting shell scripts
       apt-get update
       apt-get install --yes \
+        build-essential \
         ca-certificates \
         curl \
         gcc-aarch64-linux-gnu \
@@ -78,8 +83,8 @@ tasks:
     description: Create a user who doesn't have root privileges.
     user: root
     command: |
-      # Create a user named `user` with a home directory.
-      adduser --disabled-password --gecos '' user
+      # Create a user named `user` with a home directory and with Bash as the login shell.
+      useradd user --create-home --shell /bin/bash
 
   install_rust:
     description: Install Rust, a systems programming language.
@@ -87,18 +92,18 @@ tasks:
       - install_packages
       - create_user
     command: |
-      # Install stable Rust [tag:rust_1.73.0].
+      # Install stable Rust [tag:rust_1.81.0].
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
         -y \
-        --default-toolchain 1.73.0 \
+        --default-toolchain 1.81.0 \
         --profile minimal \
         --component clippy
 
       # Add Rust tools to `$PATH`.
       . "$HOME/.cargo/env"
 
-      # Install nightly Rust [ref:rust_fmt_nightly_2023-10-06].
-      rustup toolchain install nightly-2023-10-06 --profile minimal --component rustfmt
+      # Install nightly Rust [ref:rust_fmt_nightly_2024-09-06].
+      rustup toolchain install nightly-2024-09-06 --profile minimal --component rustfmt
 
   install_tools:
     description: Install the tools needed to build and validate the program.
@@ -159,28 +164,30 @@ tasks:
     input_paths:
       - .
     excluded_input_paths:
-      # [tag:excluded_input_paths] Keep this in sync with [ref:gitignore] and [ref:dockerignore].
+      # [tag:excluded_input_paths] Keep this in sync with [file:.gitignore] and
+      # [file:.dockerignore].
       - .git
       - artifacts
       - target
     command: |
-      # Lint the code with Clippy.
-      cargo-offline clippy --all-features --all-targets --workspace
-
       # Check references with Tagref.
       tagref
 
       # Lint shell files with ShellCheck.
       find . -type f -name '*.sh' | xargs shellcheck
 
+      # Lint the code with Clippy.
+      cargo-offline clippy --all-features --all-targets --workspace
+
       # Check code formatting with Rustfmt. See [ref:format_macros] for an explanation of the `rg`
       # commands.
-      rg '!\(' --type rust --files-with-matches src | xargs sed -i 's/!(/_(/g'
+      rg --type rust --files-with-matches '' src | xargs sed -i 's/!(/_(/g'
+      rg --type rust --files-with-matches '' src | xargs sed -i 's/^\([^ (]*\)_(/\1!(/g'
       if ! cargo-fmt --check; then
         echo 'ERROR: Please correct the formatting errors above.' 1>&2
         exit 1
       fi
-      rg '_\(' --type rust --files-with-matches src | xargs sed -i 's/_(/!(/g'
+      rg --type rust --files-with-matches '' src | xargs sed -i 's/_(/!(/g'
 
       # Forbid unconsolidated `use` declarations.
       if rg --line-number --type rust --multiline '}[[:space]]*;[[:space:]]*\n[[:space:]]*use' src
@@ -214,9 +221,10 @@ tasks:
     command: |
       # Format the code with Rustfmt. We temporarily convert macro invocations into function calls
       # so Rustfmt's `trailing_comma` feature applies to macro arguments [tag:format_macros].
-      rg '!\(' --type rust --files-with-matches src | xargs sed -i 's/!(/_(/g'
+      rg --type rust --files-with-matches '' src | xargs sed -i 's/!(/_(/g'
+      rg --type rust --files-with-matches '' src | xargs sed -i 's/^\([^ (]*\)_(/\1!(/g'
       cargo-fmt
-      rg '_\(' --type rust --files-with-matches src | xargs sed -i 's/_(/!(/g'
+      rg --type rust --files-with-matches '' src | xargs sed -i 's/_(/!(/g'
 
   release:
     description: Build and output the release binaries for Linux.

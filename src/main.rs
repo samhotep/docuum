@@ -1,5 +1,3 @@
-#![deny(clippy::all, clippy::pedantic, warnings)]
-
 mod format;
 mod run;
 mod state;
@@ -12,12 +10,14 @@ use {
     clap::{App, AppSettings, Arg},
     env_logger::{fmt::Color, Builder},
     log::{Level, LevelFilter},
+    parse_duration::parse,
     regex::RegexSet,
     std::{
         env,
         io::{self, Write},
         process::exit,
         str::FromStr,
+        sync::{Arc, Mutex},
         thread::sleep,
         time::Duration,
     },
@@ -37,6 +37,7 @@ const DEFAULT_THRESHOLD: &str = "10 GB";
 // Command-line argument and option names
 const DELETION_CHUNK_SIZE_OPTION: &str = "deletion-chunk-size";
 const KEEP_OPTION: &str = "keep";
+const MIN_AGE_OPTION: &str = "min-age";
 const THRESHOLD_OPTION: &str = "threshold";
 
 // Size threshold argument, absolute or relative to filesystem size
@@ -65,7 +66,7 @@ impl Threshold {
                             )
                         })
                         .and_then(|f| {
-                            if f.is_normal() && (0.0..=100.0).contains(&f) {
+                            if f.is_normal() && (0.0_f64..=100.0_f64).contains(&f) {
                                 Ok(f)
                             } else {
                                 Err(io::Error::new(
@@ -108,9 +109,10 @@ impl Threshold {
 
 // This struct represents the command-line arguments.
 pub struct Settings {
-    threshold: Threshold,
-    keep: Option<RegexSet>,
     deletion_chunk_size: usize,
+    keep: Option<RegexSet>,
+    min_age: Option<Duration>,
+    threshold: Threshold,
 }
 
 // Set up the logger.
@@ -193,30 +195,19 @@ fn settings() -> io::Result<Settings> {
                 .value_name("DELETION CHUNK SIZE")
                 .short("d")
                 .long(DELETION_CHUNK_SIZE_OPTION)
-                .number_of_values(1)
                 .help(&format!(
                     "Removes specified quantity of images at a time \
                         (default: {DEFAULT_DELETION_CHUNK_SIZE})",
                 )),
         )
+        .arg(
+            Arg::with_name(MIN_AGE_OPTION)
+                .value_name("MIN AGE")
+                .short("m")
+                .long(MIN_AGE_OPTION)
+                .help("Sets the minimum age of images to be considered for deletion"),
+        )
         .get_matches();
-
-    // Read the threshold.
-    let default_threshold = Threshold::Absolute(
-        Byte::from_str(DEFAULT_THRESHOLD).unwrap(), // Manually verified safe
-    );
-    let threshold = matches
-        .value_of(THRESHOLD_OPTION)
-        .map_or_else(|| Ok(default_threshold), Threshold::from_str)?;
-
-    // Determine what images need to be preserved at all costs.
-    let keep = match matches.values_of(KEEP_OPTION) {
-        Some(values) => match RegexSet::new(values) {
-            Ok(set) => Some(set),
-            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
-        },
-        None => None,
-    };
 
     // Determine how many images to delete at once.
     let deletion_chunk_size = match matches.value_of(DELETION_CHUNK_SIZE_OPTION) {
@@ -227,15 +218,68 @@ fn settings() -> io::Result<Settings> {
         None => DEFAULT_DELETION_CHUNK_SIZE,
     };
 
+    // Determine what images need to be preserved at all costs.
+    let keep = match matches.values_of(KEEP_OPTION) {
+        Some(values) => match RegexSet::new(values) {
+            Ok(set) => Some(set),
+            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
+        },
+        None => None,
+    };
+
+    // Determine the minimum age for images to be considered for deletion.
+    let min_age = match matches.value_of(MIN_AGE_OPTION) {
+        Some(value) => match parse(value) {
+            Ok(duration) => Some(duration),
+            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
+        },
+        None => None,
+    };
+
+    // Read the threshold.
+    let default_threshold = Threshold::Absolute(
+        Byte::from_str(DEFAULT_THRESHOLD).unwrap(), // Manually verified safe
+    );
+    let threshold = matches
+        .value_of(THRESHOLD_OPTION)
+        .map_or_else(|| Ok(default_threshold), Threshold::from_str)?;
+
     Ok(Settings {
-        threshold,
-        keep,
         deletion_chunk_size,
+        keep,
+        min_age,
+        threshold,
     })
+}
+
+// This function consumes and runs all the registered destructors. We use this mechanism instead of
+// RAII for things that need to be cleaned up even when the process is killed due to a signal.
+#[allow(clippy::type_complexity)]
+fn run_destructors(destructors: &Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>) {
+    let mut mutex_guard = destructors.lock().unwrap();
+    let destructor_fns = std::mem::take(&mut *mutex_guard);
+    for destructor in destructor_fns {
+        destructor();
+    }
 }
 
 // Let the fun begin!
 fn main() {
+    // If Docuum is in the foreground process group for some TTY, the process will receive a SIGINT
+    // when the user types CTRL+C at the terminal. The default behavior is to crash when this signal
+    // is received. However, we would rather clean up resources before terminating, so we trap the
+    // signal here. This code also traps SIGHUP and SIGTERM, since we compile the `ctrlc` crate with
+    // the `termination` feature [ref:ctrlc_term].
+    let destructors = Arc::new(Mutex::new(Vec::<Box<dyn FnOnce() + Send>>::new()));
+    let destructors_clone = destructors.clone();
+    if let Err(error) = ctrlc::set_handler(move || {
+        run_destructors(&destructors_clone);
+        exit(1);
+    }) {
+        // Log the error and proceed anyway.
+        error!("{}", error);
+    }
+
     // Determine whether to print colored output.
     colored::control::set_override(atty::is(Stream::Stderr));
 
@@ -268,10 +312,16 @@ fn main() {
 
     // Stream Docker events and vacuum when necessary. Restart if an error occurs.
     loop {
-        if let Err(e) = run(&settings, &mut state, &mut first_run) {
-            error!("{}", e);
-            info!("Retrying in 5 seconds\u{2026}");
-            sleep(Duration::from_secs(5));
+        // This will run until an error occurs (it never returns `Ok`).
+        if let Err(error) = run(&settings, &mut state, &mut first_run, &destructors) {
+            error!("{}", error);
         }
+
+        // Clean up any resources left over from that run.
+        run_destructors(&destructors);
+
+        // Wait a moment and then retry.
+        info!("Retrying in 5 seconds\u{2026}");
+        sleep(Duration::from_secs(5));
     }
 }

@@ -50,6 +50,9 @@ OPTIONS:
     -k, --keep <REGEX>...
             Prevents deletion of images for which repository:tag matches <REGEX>
 
+    -m, --min-age <MIN AGE>
+            Sets the minimum age of images to be considered for deletion
+
     -t, --threshold <THRESHOLD>
             Sets the maximum amount of space to be used for Docker images (default: 10 GB)
 
@@ -60,6 +63,12 @@ OPTIONS:
 The `--threshold` flag accepts [multiple representations](https://docs.rs/byte-unit/4.0.12/byte_unit/struct.Byte.html#examples-2), like `10 GB`, `10 GiB`, or `10GB`. On Linux, percentage-based thresholds like `50%` are also supported.
 
 You can change the log verbosity by setting an environment variable named `LOG_LEVEL` to one of `trace`, `debug`, `info`, `warning`, or `error`. The default is `debug`.
+
+## Docker's build cache
+
+Old versions of Docker would create an intermediate image for each step in your `Dockerfile`, and Docuum would happily vacuum them when needed. Since the introduction of [BuildKit](https://docs.docker.com/build/buildkit/), Docker no longer produces those intermediate images, and a separate "build cache" is used instead. BuildKit has its own [garbage collector](https://docs.docker.com/build/cache/garbage-collection/) for its build cache with a default threshold of 10% of the total disk capacity.
+
+Docuum does not vacuum BuildKit's build cache, and BuildKit's garbage collector doesn't vacuum images. Both can be used together.
 
 ## Installation instructions
 
@@ -97,7 +106,7 @@ If you prefer not to use this installation method, you can download the binary f
 
 If you're running Windows (AArch64 or x86-64), download the latest binary from the [releases page](https://github.com/stepchowfun/docuum/releases) and rename it to `docuum` (or `docuum.exe` if you have file extensions visible). Create a directory called `Docuum` in your `%PROGRAMFILES%` directory (e.g., `C:\Program Files\Docuum`), and place the renamed binary in there. Then, in the "Advanced" tab of the "System Properties" section of Control Panel, click on "Environment Variables..." and add the full path to the new `Docuum` directory to the `PATH` variable under "System variables". Note that the `Program Files` directory might have a different name if Windows is configured for a language other than English.
 
-To update to an existing installation, simply replace the existing binary.
+To update an existing installation, simply replace the existing binary.
 
 #### Installation with Homebrew
 
@@ -237,4 +246,3 @@ If you configured a path for the log file in the `I/O` tab of the installation w
 ## Requirements
 
 - Docuum requires [Docker Engine](https://www.docker.com/products/container-runtime) 17.03.0 or later.
-  - If you are using Docker Engine 18.09.0 or later with [BuildKit mode](https://docs.docker.com/develop/develop-images/build_enhancements/) enabled, Docker does not create intermediate images for each build step and instead uses a separate "build cache". Docuum will only clean up images, not the Buildkit build cache. BuildKit's built-in garbage collection feature can be used for the build cache (e.g., `docker builder prune --all --force --keep-storage '10 GB'`). If you are not using BuildKit mode, Docker's caching mechanism uses intermediate images, and Docuum will happily vacuum such images as usual.
